@@ -2,6 +2,7 @@ from django.conf import settings
 from django.core.mail import EmailMessage, get_connection
 
 from celery import shared_task
+from celery.utils.time import get_exponential_backoff_interval
 
 # Make sure our AppConf is loaded properly.
 import djcelery_email.conf  # noqa
@@ -20,8 +21,8 @@ if 'base' in TASK_CONFIG and isinstance(TASK_CONFIG['base'], str):
     TASK_CONFIG['base'] = import_string(TASK_CONFIG['base'])
 
 
-@shared_task(**TASK_CONFIG)
-def send_emails(messages, backend_kwargs=None, **kwargs):
+@shared_task(bind=True, **TASK_CONFIG)
+def send_emails(self, messages, backend_kwargs=None, **kwargs):
     # backward compat: handle **kwargs and missing backend_kwargs
     combined_kwargs = {}
     if backend_kwargs is not None:
@@ -38,8 +39,12 @@ def send_emails(messages, backend_kwargs=None, **kwargs):
     conn = get_connection(backend=settings.CELERY_EMAIL_BACKEND, **combined_kwargs)
     try:
         conn.open()
-    except Exception:
-        logger.exception("Cannot reach CELERY_EMAIL_BACKEND %s", settings.CELERY_EMAIL_BACKEND)
+    except Exception as e:
+        logger.warning("Cannot reach CELERY_EMAIL_BACKEND %s", settings.CELERY_EMAIL_BACKEND)
+        countdown = get_exponential_backoff_interval(
+            factor=20, retries=self.request.retries, maximum=600, full_jitter=True,
+        )
+        self.retry(exc=e, countdown=countdown, max_retries=5)
 
     messages_sent = 0
 
